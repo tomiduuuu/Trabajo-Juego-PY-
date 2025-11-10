@@ -15,15 +15,18 @@ class Player:
         self.image = create_player_sprite()
         self.rect = pygame.Rect(x_blocks * s.TILE_SIZE, y_blocks * s.TILE_SIZE, self.image.get_width(), self.image.get_height())
         
+        # Física mejorada (estilo Terraria)
         self.vx = 0.0
         self.vy = 0.0
-        self.move_speed = 0.4       
-        self.max_speed = 4.0        
-        self.friction = 0.85        
-        self.jump_power = -10.0
+        self.move_speed = 8.0        # Más rápido
+        self.acceleration = 0.5      # Aceleración suave
+        self.deceleration = 0.4      # Desaceleración suave
+        self.max_speed = 8.0        
+        self.jump_power = -12.0      # Salto más potente
         self.on_ground = False
         self.facing_right = True
         
+        # Estadísticas del jugador
         self.clase = "Aspirante"
         self.health = 100
         self.max_health = 100
@@ -37,27 +40,49 @@ class Player:
         self.invincible = False
         self.invincibility_timer = 0
         
+        # Inventario y equipo
         self.inventory = {} 
         self.hotbar = [None] * 9 
         self.hotbar_selected = 0 
-        self.inventory_open = False 
+        self.inventory_open = False
+        self.equipped_tool = None
+        self.equipped_weapon = None
+        
+        # Sistema de minería progresiva
+        self.mining_target = None  # (x, y) del bloque que se está minando
+        self.mining_progress = 0.0  # Progreso actual (0.0 a 1.0)
+        self.mining_speed = 1.0     # Velocidad base (mano)
         
     def update(self, world, moving_left, moving_right):
-        
+        # Movimiento horizontal mejorado (estilo Terraria)
         if moving_left:
-            self.vx -= self.move_speed
+            if self.vx > 0:  # Cambiando de dirección
+                self.vx -= self.deceleration * 2
+            else:
+                self.vx -= self.acceleration
             self.facing_right = False
+            
         if moving_right:
-            self.vx += self.move_speed
+            if self.vx < 0:  # Cambiando de dirección
+                self.vx += self.deceleration * 2
+            else:
+                self.vx += self.acceleration
             self.facing_right = True
             
+        # Desaceleración cuando no se mueve
         if not moving_left and not moving_right:
-            self.vx *= self.friction
-            if abs(self.vx) < 0.1: self.vx = 0
-            
+            if self.vx > 0:
+                self.vx -= self.deceleration
+                if self.vx < 0: self.vx = 0
+            elif self.vx < 0:
+                self.vx += self.deceleration
+                if self.vx > 0: self.vx = 0
+        
+        # Limitar velocidad máxima
         if self.vx > self.max_speed: self.vx = self.max_speed
         if self.vx < -self.max_speed: self.vx = -self.max_speed
             
+        # Aplicar movimiento horizontal
         self.rect.x += int(self.vx)
         colliding_blocks = world_utils.get_blocks_in_rect(world, self.rect)
         for x, y in colliding_blocks:
@@ -69,13 +94,15 @@ class Player:
                 self.rect.left = block_rect.right
                 self.vx = 0
         
+        # Aplicar gravedad
         if not self.on_ground:
             self.vy += s.GRAVITY
-            if self.vy > 10: self.vy = 10
+            if self.vy > 15: self.vy = 15  # Velocidad terminal más alta
                 
         self.rect.y += int(self.vy)
         self.on_ground = False 
         
+        # Colisión vertical
         colliding_blocks = world_utils.get_blocks_in_rect(world, self.rect)
         for x, y in colliding_blocks:
             block_rect = pygame.Rect(x * s.TILE_SIZE, y * s.TILE_SIZE, s.TILE_SIZE, s.TILE_SIZE)
@@ -85,7 +112,96 @@ class Player:
                 self.vy = 0
             elif self.vy < 0:
                 self.rect.top = block_rect.bottom
-                self.vy = 0 
+                self.vy = 0
+
+    def update_mining(self, dt, world, target_block):
+        """Actualiza el progreso de minería"""
+        if target_block != self.mining_target:
+            # Cambió el bloque objetivo, reiniciar progreso
+            self.mining_target = target_block
+            self.mining_progress = 0.0
+            return False
+        
+        if target_block is None:
+            self.mining_progress = 0.0
+            return False
+            
+        gx, gy = target_block
+        block_id = world_utils.get_block(world, gx, gy)
+        
+        if block_id == s.BLOCK_AIR:
+            # El bloque ya fue minado
+            self.mining_progress = 0.0
+            self.mining_target = None
+            return False
+        
+        # Calcular velocidad de minería
+        mining_speed = self.get_mining_speed(block_id)
+        base_time = s.BLOCK_HARDNESS.get(block_id, 3.0)
+        time_to_mine = base_time / mining_speed
+        
+        # Actualizar progreso
+        self.mining_progress += dt / time_to_mine
+        
+        if self.mining_progress >= 1.0:
+            # Bloque minado completamente
+            self.mining_progress = 0.0
+            self.mining_target = None
+            return True
+        
+        return False
+
+    def get_mining_speed(self, block_id):
+        """Obtiene la velocidad de minería para un bloque específico"""
+        # Velocidad base (mano)
+        speed = s.TOOL_SPEED["Mano"]
+        
+        # Verificar herramienta equipada
+        selected = self.hotbar[self.hotbar_selected]
+        if selected:
+            tool_name = selected['name']
+            if tool_name in s.TOOL_SPEED:
+                # Verificar si la herramienta es efectiva para este bloque
+                if self.is_tool_effective(tool_name, block_id):
+                    speed = s.TOOL_SPEED[tool_name]
+                else:
+                    # Herramienta no efectiva, penalización
+                    speed = max(1.0, s.TOOL_SPEED[tool_name] * 0.3)
+        
+        return speed
+
+    def is_tool_effective(self, tool_name, block_id):
+        """Verifica si la herramienta es efectiva para el bloque"""
+        if block_id not in s.EFFECTIVE_TOOLS:
+            return True  # Bloques sin herramienta específica
+        
+        effective_tools = s.EFFECTIVE_TOOLS[block_id]
+        tool_type = self.get_tool_type(tool_name)
+        
+        return tool_type in effective_tools
+
+    def get_tool_type(self, tool_name):
+        """Obtiene el tipo de herramienta"""
+        if "pico" in tool_name.lower():
+            return "pico"
+        elif "pala" in tool_name.lower():
+            return "pala"
+        elif "hacha" in tool_name.lower():
+            return "hacha"
+        return "mano"
+
+    def get_mining_progress(self):
+        """Obtiene el progreso actual de minería (0.0 a 1.0)"""
+        return self.mining_progress
+
+    def stop_mining(self):
+        """Detiene la minería actual"""
+        self.mining_progress = 0.0
+        self.mining_target = None
+
+    def get_mining_info(self):
+        """Obtiene información sobre la minería actual"""
+        return self.mining_target, self.mining_progress
 
     def update_invincibility(self, dt):
         if self.invincible:
@@ -104,11 +220,12 @@ class Player:
                 notification_manager.add_notification("¡Has muerto!", (255, 0, 0))
 
     def draw(self, screen, offset_x, offset_y):
+        """Dibuja al jugador en la pantalla"""
         img_to_draw = self.image if self.facing_right else pygame.transform.flip(self.image, True, False)
         
         if self.invincible:
             if int(self.invincibility_timer * 10) % 2 == 0:
-                return 
+                return  # Efecto de parpadeo cuando es invencible
         
         screen.blit(
             img_to_draw,
@@ -121,13 +238,19 @@ class Player:
             self.on_ground = False
 
     def attack(self):
-        pass 
+        # Verificar si tiene un arma equipada
+        selected = self.hotbar[self.hotbar_selected]
+        if selected and "Espada" in selected['name']:
+            self.equipped_weapon = selected['name']
+            return True
+        return False
         
     def get_attack_rect(self):
+        attack_range = s.TILE_SIZE * 1.5
         if self.facing_right:
-            return pygame.Rect(self.rect.right, self.rect.y, s.TILE_SIZE * 2, self.rect.height)
+            return pygame.Rect(self.rect.right, self.rect.y, attack_range, self.rect.height)
         else:
-            return pygame.Rect(self.rect.left - (s.TILE_SIZE * 2), self.rect.y, s.TILE_SIZE * 2, self.rect.height)
+            return pygame.Rect(self.rect.left - attack_range, self.rect.y, attack_range, self.rect.height)
 
     def add_to_inventory(self, item_name_or_id):
         item_name = s.BLOCK_NAMES.get(item_name_or_id, str(item_name_or_id))
@@ -139,11 +262,13 @@ class Player:
 
         self.inventory[item_name] = self.inventory.get(item_name, 0) + 1
         
+        # Actualizar hotbar
         for i in range(len(self.hotbar)):
             if self.hotbar[i] and self.hotbar[i]['name'] == item_name:
                 self.hotbar[i]['count'] += 1
                 return
         
+        # Agregar a slot vacío
         for i in range(len(self.hotbar)):
             if self.hotbar[i] is None:
                 item_id = None
@@ -184,8 +309,11 @@ class Player:
     def set_clase(self, clase):
         self.clase = clase
         if clase == "Mago":
-            self.max_mana = 50
-            self.mana = 50
+            self.max_mana = 100
+            self.mana = 100
         elif clase == "Guerrero":
             self.max_health = 150
             self.health = 150
+        elif clase == "Arquero":
+            self.max_health = 120
+            self.health = 120
